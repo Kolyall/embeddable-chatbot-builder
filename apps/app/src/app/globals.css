@@ -1,0 +1,98 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+/* Pull in Tailwind classes referenced only inside the shared @cbb/ui
+   component source (not otherwise visible to this app's own content scan). */
+@source "../../../../packages/ui/src";
+
+:root {
+  --background: #faf8ef;
+  --foreground: #1b221c;
+
+  --card: #ffffff;
+  --card-foreground: #1b221c;
+
+  --popover: #ffffff;
+  --popover-foreground: #1b221c;
+
+  --primary: #17a673;
+  --primary-foreground: #ffffff;
+
+  --secondary: #fdecd8;
+  --secondary-foreground: #7a3b0e;
+
+  --muted: #f1eedf;
+  --muted-foreground: #63705f;
+
+  --accent: #f2762e;
+  --accent-foreground: #ffffff;
+
+  --destructive: #d14343;
+  --destructive-foreground: #ffffff;
+
+  --success: #2f9e5b;
+  --success-foreground: #ffffff;
+
+  --warning: #d98a17;
+  --warning-foreground: #3a2600;
+
+  --border: #e4e0ce;
+  --input: #e4e0ce;
+  --ring: #17a673;
+
+  --radius: 0.875rem;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
+  --color-warning: var(--warning);
+  --color-warning-foreground: var(--warning-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --radius-sm: calc(var(--radius) - 6px);
+  --radius-md: calc(var(--radius) - 3px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 6px);
+
+  --font-sans: var(--font-body);
+  --font-display: var(--font-display);
+  --font-mono: var(--font-mono);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+}
+
+::selection {
+  background: var(--primary);
+  color: var(--primary-foreground);
+}
+
+* {
+  border-color: var(--border);
+}
+
+:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}

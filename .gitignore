@@ -1,0 +1,44 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Next.js
+.next/
+out/
+
+# Turborepo
+.turbo/
+
+# Build output
+dist/
+build/
+
+# Env
+.env
+.env.*
+!.env.example
+!.env.prod.example
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# OS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+
+# Supabase (self-hosted vendored copy keeps its own env handling)
+supabase/.env
+supabase/volumes/db/data/
+
+# TypeScript
+*.tsbuildinfo
+
+# Local screen recordings (large binaries — keep the demo video out of git
+# history; upload it separately, e.g. YouTube/Loom)
+presentation/*.mov
+presentation/*.mp4

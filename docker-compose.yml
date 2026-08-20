@@ -1,0 +1,142 @@
+# Root docker-compose.yml — LOCAL DEV / DRY-RUN only.
+#
+# This project's real day-to-day dev workflow is host-run `pnpm dev` via
+# Turborepo (apps talk to Supabase through the Supavisor pooler exposed on
+# localhost:5432, per the DATABASE_URL in ./.env). This compose file exists
+# so the *whole* stack (Supabase + all 3 Next.js apps + the worker + nginx)
+# can also be run fully containerized, as a verification/dry-run step —
+# hence app/worker/admin/landing/nginx are gated behind the "containers"
+# Compose profile so plain `docker compose up -d` only starts Supabase
+# (matching today's host-dev workflow), while
+# `docker compose --profile containers up -d --build` starts everything.
+#
+# `include:` merges the already-vendored, untouched Supabase self-hosting
+# distribution (./supabase/docker-compose.yml) into this project. Its
+# services (db, api-gw, auth, rest, ...) have no networks: override of their
+# own, so they land on this project's default network and are reachable by
+# service name (e.g. "db", "api-gw") from app/admin/worker below.
+include:
+  - path: ./supabase/docker-compose.yml
+    env_file: ./supabase/.env
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: apps/app/Dockerfile
+      args:
+        # Baked into the client bundle at build time — must be a
+        # BROWSER-reachable address, hence the root .env's host-facing
+        # value (http://localhost:8000), not the container-network one.
+        NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL}
+        NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY}
+    image: cbb-app:local
+    container_name: cbb-app
+    profiles: ["containers"]
+    env_file:
+      - ./.env
+    environment:
+      # These override the same-named keys loaded from ./.env above (Compose
+      # applies service-level `environment:` after `env_file:`), because the
+      # root .env's values are for HOST-run `pnpm dev` (Supavisor pooler on
+      # localhost:5432, tenant-qualified username; Supabase gateway on
+      # localhost:8000) which are wrong from inside a container on this same
+      # Docker network — there the plain "postgres" user talks straight to
+      # the "db" service, and server-side Supabase calls go straight to the
+      # "api-gw" service.
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/postgres
+      SUPABASE_URL: http://api-gw:8000
+    depends_on:
+      db:
+        condition: service_healthy
+      api-gw:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Same image as `app`, just a different command — the ingestion worker
+  # bundle (apps/app/dist/worker.js) built alongside the Next server in
+  # apps/app/Dockerfile's builder stage.
+  worker:
+    image: cbb-app:local
+    container_name: cbb-worker
+    profiles: ["containers"]
+    command: ["node", "dist/worker.js"]
+    env_file:
+      - ./.env
+    environment:
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/postgres
+      SUPABASE_URL: http://api-gw:8000
+    depends_on:
+      db:
+        condition: service_healthy
+      api-gw:
+        condition: service_healthy
+    healthcheck:
+      # The image's HEALTHCHECK curls the Next server's own /app/login route
+      # (apps/app/Dockerfile), which isn't listening here since `command`
+      # runs the worker instead of `node server.js` — disable it rather than
+      # have Compose report a false "unhealthy".
+      disable: true
+    restart: unless-stopped
+
+  admin:
+    build:
+      context: .
+      dockerfile: apps/admin/Dockerfile
+      args:
+        NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL}
+        NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY}
+    image: cbb-admin:local
+    container_name: cbb-admin
+    profiles: ["containers"]
+    env_file:
+      - ./.env
+    environment:
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/postgres
+      SUPABASE_URL: http://api-gw:8000
+    depends_on:
+      db:
+        condition: service_healthy
+      api-gw:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # No Supabase/DB access at all, so no env_file/build args needed.
+  landing:
+    build:
+      context: .
+      dockerfile: apps/landing/Dockerfile
+    image: cbb-landing:local
+    container_name: cbb-landing
+    profiles: ["containers"]
+    restart: unless-stopped
+
+  # Single public entrypoint, path-based routing to the 3 Next.js apps (see
+  # nginx/nginx.conf header comment for why Supabase's own gateway is
+  # intentionally NOT also proxied through here).
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: cbb-nginx
+    profiles: ["containers"]
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "80:80"
+    depends_on:
+      app:
+        condition: service_healthy
+      admin:
+        condition: service_healthy
+      landing:
+        condition: service_healthy
+    healthcheck:
+      # Use 127.0.0.1, not "localhost": this alpine image's resolver tries
+      # ::1 (IPv6) first for "localhost", and nginx here only listens on
+      # IPv4, so "localhost" intermittently fails with connection refused
+      # even though the proxy itself is working fine.
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped

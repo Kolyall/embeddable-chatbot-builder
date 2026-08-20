@@ -1,0 +1,386 @@
+# docker-compose_vps.yml — PRODUCTION deploy target, run directly on the VPS.
+#
+# Baseline assumption for the mem_limit/cpus values below: a small 4GB RAM /
+# 2 vCPU droplet (e.g. DigitalOcean/Hetzner/Linode's smallest general-purpose
+# tier). Adjust upward if you provision a bigger box.
+#
+# How this differs from the root docker-compose.yml (that file is dev/dry-run
+# only — see its own header comment):
+#   - app/admin/landing reference PREBUILT images (no `build:` key). You
+#     build + push these by hand (or from your own CI later — out of scope
+#     here) using the existing Dockerfiles; see README.md "VPS deployment".
+#   - No `profiles:` gate: every service always starts — this file IS the
+#     production scenario, unlike the dev file where containerizing the
+#     Next apps is opt-in.
+#   - Only `nginx` is reachable from the public internet (80/443). Every
+#     other service is either published to 127.0.0.1 only (so the operator
+#     can still reach it from the VPS itself, e.g. over an SSH tunnel, for
+#     debugging / Supabase Studio) or not published to the host at all.
+#   - `restart: always` everywhere (vs "unless-stopped" in the dev file) —
+#     a VPS should come back up after a host reboot even if a container was
+#     manually stopped and the operator forgot to restart it.
+#   - Resource limits sized for the 4GB/2vCPU baseline (see per-service
+#     comments). These are ceilings, not reservations — Docker doesn't
+#     pre-allocate them, so the nominal sum can exceed physical RAM/CPU a
+#     bit without problems, since services rarely all peak at once. Total
+#     mem_limit below sums to ~3.3GB (after the trim described below),
+#     down from ~4GB for the untrimmed stack.
+#   - Trimmed footprint: `studio`, `meta`, `functions`, and `supavisor` are
+#     gated behind a `disabled` Compose profile (see each service below for
+#     why) so plain `docker compose -f docker-compose_vps.yml up -d` never
+#     starts, pulls, or reserves memory for them — meant for small VPSes
+#     (e.g. 1 vCPU / 4GB) where the full untrimmed stack doesn't fit
+#     alongside this project's own 5 containers. None of this product's
+#     code (apps/*/src, packages/*/src) calls Studio, pg-meta, Edge
+#     Functions, or the Supavisor pooler — see each service's comment for
+#     how that was verified. To temporarily start one anyway (e.g. Studio
+#     over an SSH tunnel for a one-off DB inspection), run
+#     `docker compose -f docker-compose_vps.yml --profile disabled up -d studio`.
+#   - Healthcheck start_period/timeouts widened somewhat vs the dev file
+#     (a VPS's disk I/O is assumed slower than a dev laptop's, especially
+#     on first boot with a cold page cache).
+#
+# Browser access to Supabase in production: unlike the dev file (where the
+# browser hits Supabase's gateway directly at http://localhost:8000, per
+# nginx/nginx.conf's header comment), here api-gw is NOT publicly exposed —
+# only nginx is. So nginx additionally reverse-proxies Supabase's own API
+# path prefixes (/auth/v1/, /rest/v1/, /storage/v1/, /realtime/v1/,
+# /functions/v1/) through to api-gw:8000 over the container network — see
+# nginx/nginx.vps.conf's header comment for the full rationale. This means
+# NEXT_PUBLIC_SUPABASE_URL must be baked into the app/admin images at build
+# time as your public https://<domain> (no port), not a Supabase-specific
+# host/port — see README.
+#
+# api-gw is still bound to 127.0.0.1:8000 (not fully unpublished) purely so
+# the operator can reach the raw Auth/REST/Storage/Realtime API from the VPS
+# itself, e.g. via `ssh -L 8000:127.0.0.1:8000 <vps>` — and Studio too, on
+# the rare occasion it's started via `--profile disabled` (see below).
+#
+# Optional heavy Supabase services: this project's `include:` below only
+# pulls in supabase/docker-compose.yml, which does NOT define an
+# analytics/Logflare/Vector service (that lives in the vendored, OPTIONAL
+# supabase/docker-compose.logs.yml override — see its own file — which
+# nothing here layers in). So there is nothing heavy to comment out on that
+# front; it was simply never part of this stack.
+#
+# `functions` (Edge Functions), `studio`, `meta`, and `supavisor` ARE part
+# of the included stack but are gated off below (`profiles: [disabled]`):
+# Envoy's static routing config (supabase/volumes/api/envoy/cds.yaml) uses
+# STRICT_DNS clusters with their own independent health checks for every
+# backend, `functions` included — so a missing backend just leaves that one
+# cluster unhealthy (its path 503s) without affecting auth/rest/storage/
+# realtime or api-gw's own health. This product's code never calls
+# Edge Functions, Studio, pg-meta, or the Supavisor pooler (confirmed: no
+# `functions.invoke`/`supabase/functions` call site, and DATABASE_URL below
+# connects straight to `db:5432`, bypassing the pooler entirely) — dropping
+# all four frees ~700MB of mem_limit ceiling plus their (unpulled) image
+# weight, which matters on a small single-core VPS.
+#
+# Usage: see scripts/vps-deploy.sh and the README's "VPS deployment" section.
+# Validate this file resolves correctly with:
+#   docker compose -f docker-compose_vps.yml config
+
+include:
+  - path: ./supabase/docker-compose.yml
+    env_file: ./supabase/.env
+
+services:
+  # ---------------------------------------------------------------------
+  # Supabase services (vendored supabase/docker-compose.yml, untouched) —
+  # re-scoped here to 127.0.0.1-only publishing (or no publishing at all)
+  # and given VPS-appropriate restart/resource/healthcheck settings.
+  # `ports: !override [...]` fully replaces the included file's port list
+  # instead of appending to it (Compose Specification merge tag).
+  # ---------------------------------------------------------------------
+
+  api-gw:
+    restart: always
+    mem_limit: 96m
+    cpus: 0.15
+    ports: !override
+      - "127.0.0.1:${API_GW_HTTP_PORT:-8000}:8000"
+    # The vendored file makes api-gw wait on studio's healthcheck before
+    # starting (envoy proxies "/" to studio); studio is disabled below, so
+    # that dependency is dropped entirely rather than left dangling.
+    depends_on: !override {}
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 1 bash -c '</dev/tcp/127.0.0.1/8000'"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+  studio:
+    # Dev-only DB admin dashboard — not called by any app code, and not
+    # needed for the product to run in production. Start it on demand with
+    # `docker compose -f docker-compose_vps.yml --profile disabled up -d studio`
+    # (reach it over an SSH tunnel: `ssh -L 8000:127.0.0.1:8000 <vps>`, then
+    # browse http://localhost:8000/).
+    profiles: ["disabled"]
+    restart: always
+    mem_limit: 256m
+    cpus: 0.25
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"fetch('http://localhost:3000/api/platform/profile').then((r) => {if (r.status !== 200) throw new Error(r.status)})\""
+        ]
+      timeout: 15s
+      interval: 10s
+      retries: 5
+      start_period: 40s
+
+  auth:
+    restart: always
+    mem_limit: 128m
+    cpus: 0.15
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "--no-verbose",
+          "--tries=1",
+          "--spider",
+          "http://localhost:9999/health"
+        ]
+      timeout: 10s
+      interval: 10s
+      retries: 5
+      start_period: 20s
+
+  rest:
+    restart: always
+    mem_limit: 128m
+    cpus: 0.15
+    healthcheck:
+      test: ["CMD", "postgrest", "--ready"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+  realtime:
+    restart: always
+    mem_limit: 192m
+    cpus: 0.2
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -sSfL --head -o /dev/null -H \"Authorization: Bearer ${ANON_KEY}\" http://localhost:4000/api/tenants/realtime-dev/health"
+        ]
+      timeout: 10s
+      interval: 30s
+      retries: 5
+      start_period: 30s
+
+  storage:
+    restart: always
+    mem_limit: 160m
+    cpus: 0.15
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "--no-verbose",
+          "--tries=1",
+          "--spider",
+          "http://storage:5000/status"
+        ]
+      timeout: 10s
+      interval: 10s
+      retries: 5
+      start_period: 30s
+
+  imgproxy:
+    restart: always
+    mem_limit: 128m
+    cpus: 0.15
+    healthcheck:
+      test: ["CMD", "imgproxy", "health"]
+      timeout: 10s
+      interval: 10s
+      retries: 5
+      start_period: 15s
+
+  meta:
+    # Only exists to back Studio (STUDIO_PG_META_URL) — nothing else in the
+    # stack talks to pg-meta. Disabled alongside Studio; re-enable together
+    # if you ever start Studio (see its comment above).
+    profiles: ["disabled"]
+    restart: always
+    mem_limit: 128m
+    cpus: 0.15
+
+  functions:
+    # Edge Functions — grepped apps/*/src and packages/*/src for
+    # `functions.invoke`/`supabase/functions` call sites: none exist, so
+    # nothing in this codebase invokes them.
+    profiles: ["disabled"]
+    restart: always
+    mem_limit: 128m
+    cpus: 0.15
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 1 bash -c '</dev/tcp/127.0.0.1/9000'"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+  db:
+    restart: always
+    mem_limit: 1024m
+    cpus: 1.0
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-h", "localhost"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  supavisor:
+    # Only used by host-run `pnpm dev` in the local-dev workflow; nothing in
+    # this containerized VPS stack connects through the pooler (app/admin/
+    # worker below talk to "db" directly, per their DATABASE_URL). Disabled
+    # here entirely. If you ever need `psql` from the VPS itself, exec
+    # straight into the db container instead of exposing a pooler port:
+    # `ssh <vps> -- docker exec -it supabase-db psql -U postgres`
+    # or start supavisor on demand with
+    # `docker compose -f docker-compose_vps.yml --profile disabled up -d supavisor`.
+    profiles: ["disabled"]
+    restart: always
+    mem_limit: 192m
+    cpus: 0.2
+    ports: !override
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+      - "127.0.0.1:${POOLER_PROXY_PORT_TRANSACTION:-6543}:6543"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "curl",
+          "-sSfL",
+          "--head",
+          "-o",
+          "/dev/null",
+          "http://127.0.0.1:4000/api/health"
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 45s
+
+  # ---------------------------------------------------------------------
+  # This project's own services.
+  # ---------------------------------------------------------------------
+
+  app:
+    # Build + push this yourself (README "VPS deployment"); REGISTRY/TAG
+    # come from .env.prod. Must be built with NEXT_PUBLIC_SUPABASE_URL set
+    # to your public https://<domain> (see nginx/nginx.vps.conf comment).
+    image: ${REGISTRY:-ghcr.io/example}/cbb-app:${TAG:-latest}
+    container_name: cbb-app
+    env_file:
+      - ./.env
+    environment:
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/postgres
+      SUPABASE_URL: http://api-gw:8000
+    depends_on:
+      db:
+        condition: service_healthy
+      api-gw:
+        condition: service_healthy
+    mem_limit: 384m
+    cpus: 0.5
+    restart: always
+
+  # Same image as `app`, just a different command (see the dev file's
+  # comment on why this is safe: apps/app/dist/worker.js is bundled
+  # alongside the Next server in apps/app/Dockerfile's builder stage).
+  worker:
+    image: ${REGISTRY:-ghcr.io/example}/cbb-app:${TAG:-latest}
+    container_name: cbb-worker
+    command: ["node", "dist/worker.js"]
+    env_file:
+      - ./.env
+    environment:
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/postgres
+      SUPABASE_URL: http://api-gw:8000
+    depends_on:
+      db:
+        condition: service_healthy
+      api-gw:
+        condition: service_healthy
+    healthcheck:
+      # See the dev file's comment: the image's baked-in HEALTHCHECK curls
+      # the Next server, which isn't listening here since `command` runs
+      # the worker instead.
+      disable: true
+    mem_limit: 384m
+    cpus: 0.5
+    restart: always
+
+  admin:
+    image: ${REGISTRY:-ghcr.io/example}/cbb-admin:${TAG:-latest}
+    container_name: cbb-admin
+    env_file:
+      - ./.env
+    environment:
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/postgres
+      SUPABASE_URL: http://api-gw:8000
+    depends_on:
+      db:
+        condition: service_healthy
+      api-gw:
+        condition: service_healthy
+    mem_limit: 384m
+    cpus: 0.5
+    restart: always
+
+  landing:
+    image: ${REGISTRY:-ghcr.io/example}/cbb-landing:${TAG:-latest}
+    container_name: cbb-landing
+    mem_limit: 256m
+    cpus: 0.25
+    restart: always
+
+  # Single public entrypoint. HTTP+HTTPS routing to the 3 Next.js apps plus
+  # a reverse proxy to Supabase's api-gw for the browser-facing API paths —
+  # see nginx/nginx.vps.conf's header comment for the full explanation, and
+  # scripts/setup-nginx-ssl.sh for how the HTTPS half of the config gets
+  # generated and enabled.
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: cbb-nginx
+    volumes:
+      - ./nginx/nginx.vps.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/certbot-webroot:/var/www/certbot:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      app:
+        condition: service_healthy
+      admin:
+        condition: service_healthy
+      landing:
+        condition: service_healthy
+      api-gw:
+        condition: service_healthy
+    healthcheck:
+      # Use 127.0.0.1, not "localhost": this alpine image's resolver tries
+      # ::1 (IPv6) first for "localhost", and nginx here only listens on
+      # IPv4, so "localhost" intermittently fails with connection refused
+      # even though the proxy itself is working fine.
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    mem_limit: 64m
+    cpus: 0.15
+    restart: always

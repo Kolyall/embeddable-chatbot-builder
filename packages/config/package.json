@@ -1,0 +1,9 @@
+{
+  "name": "@cbb/config",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./tsconfig-nextjs.json": "./typescript-config/tsconfig.nextjs.json"
+  }
+}
