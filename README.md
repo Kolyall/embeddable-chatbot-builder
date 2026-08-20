@@ -7,6 +7,29 @@ answers from your own content. Use it inside its own dashboard like a
 private ChatGPT, or embed the same chatbot on your website with a couple of
 lines of JavaScript so your visitors can ask it questions too.
 
+## Screenshots
+
+**Landing page**
+![Landing page](docs/screenshots/landing-hero.png)
+
+**Pricing**
+![Pricing](docs/screenshots/landing-pricing.png)
+
+**Dashboard**
+![Dashboard](docs/screenshots/app-dashboard.png)
+
+**BYOK provider settings** — every chatbot brings its own AI provider key
+![Chatbot settings](docs/screenshots/app-chatbot-settings.png)
+
+**Chat, grounded in your documents** — a real answer from a real chatbot
+![Chat](docs/screenshots/app-chat.png)
+
+**Embeddable widget snippet** — one script tag, copy-pasted onto any site
+![Embed](docs/screenshots/app-embed.png)
+
+**Admin console** — plan overrides, staff access, account management
+![Admin console](docs/screenshots/admin-console.png)
+
 ## Monorepo layout
 
 pnpm workspace + Turborepo, three Next.js 16 apps and a set of shared

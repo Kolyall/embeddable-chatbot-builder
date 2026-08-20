@@ -1,4 +1,4 @@
-import type { InputHTMLAttributes, ReactNode } from "react";
+import { useId, type InputHTMLAttributes, type ReactNode } from "react";
 import { cn } from "../lib/cn";
 import { Input } from "./input";
 import { Label } from "./label";
@@ -14,10 +14,17 @@ type Props = InputHTMLAttributes<HTMLInputElement> & {
  * those stay local to each form since they don't repeat as consistently.
  */
 export function TextField({ label, className, wrapperClassName, id, ...props }: Props) {
+  // Label and Input are separate elements (unlike a wrapping <label>), so
+  // they need a shared id/htmlFor to stay associated — most call sites don't
+  // pass their own id, so fall back to a generated one rather than silently
+  // breaking that association (click-to-focus, screen readers, `for`).
+  const generatedId = useId();
+  const inputId = id ?? generatedId;
+
   return (
     <div className={cn("flex flex-col gap-1.5", wrapperClassName)}>
-      <Label htmlFor={id}>{label}</Label>
-      <Input id={id} className={className} {...props} />
+      <Label htmlFor={inputId}>{label}</Label>
+      <Input id={inputId} className={className} {...props} />
     </div>
   );
 }

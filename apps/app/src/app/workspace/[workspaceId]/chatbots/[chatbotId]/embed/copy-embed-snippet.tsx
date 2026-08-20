@@ -15,7 +15,7 @@ export function CopyEmbedSnippet({ snippet }: { snippet: string }) {
 
   return (
     <div className="relative">
-      <pre className="overflow-x-auto rounded-xl border border-border bg-muted/50 p-4 pr-16 font-mono text-xs text-foreground">
+      <pre className="overflow-x-auto whitespace-pre-wrap break-all rounded-xl border border-border bg-muted/50 p-4 pr-20 font-mono text-xs text-foreground">
         {snippet}
       </pre>
       <Button
